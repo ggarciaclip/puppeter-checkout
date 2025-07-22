@@ -149,7 +149,7 @@ class ThreadSafeVideoManager {
           });
         }
       }
-    }, 500); // 500 ms intervals menos es mas video
+    }, 1000); // 1000 ms intervals menos es mas video
 
     return recording.interval;
   }
