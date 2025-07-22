@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "payclip-testing": {
+      "command": "node",
+      "args": ["index.js"],
+      "cwd": "./mcp-server",
+      "env": {
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}

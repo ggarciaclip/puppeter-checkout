@@ -1,0 +1,41 @@
+{
+  "amount": 1500.0,
+  "currency": "MXN",
+  "purchase_description": "M Payment",
+  "redirection_url": {
+    "success": "https://github.com/ClipMX/nextjs.buyer-checkout/pull/612",
+    "error": "https://github.com/ClipMX/nextjs.buyer-checkout/pulls/611",
+    "default": "https://github.com/ClipMX/nextjs.buyer-checkout/pulls"
+  },
+  "metadata": {
+    "me_reference_id": "controller",
+    "customer_info": {
+      "email": "gustavo.garcia@payclip.com",
+      "phone": "5555555555",
+      "name": ""
+    },
+    "billing_address": {
+      "zip_code": "62000",
+      "locality": "locality",
+      "city": "city",
+      "country": "",
+      "state": "state",
+      "street": "street",
+      "outdoor_number": "12345",
+      "interior_number": "N/A",
+      "reference": "reference",
+      "between_streets": "if you said so",
+      "floor": "floor"
+    }
+  },
+  "override_settings": {
+    "tip_enabled": true,
+    "locale": "es-MX",
+    "request_3ds": true
+  },
+  "custom_payment_options": {
+    "payment_method_types": ["debit", "credit", "cash", "bank_transfer"]
+  },
+  "source": "postman controller",
+  "webhook_url": "https://webhook.site/50a71a04-dd63-4d8b-a618-3204aefc8c41"
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "name": "OXXO",
+    "textSelector": "[data-testid='storeFinderCashPayment-store-oxxo'] p",
+    "clickableElementSelector": "[data-testid='storeFinderCashPayment-store-oxxo']"
+  },
+  {
+    "name": "7-Eleven",
+    "textSelector": "[data-testid='storeFinderCashPayment-store-sevenEleven'] p",
+    "clickableElementSelector": "[data-testid='storeFinderCashPayment-store-sevenEleven']"
+  },
+  {
+    "name": "Walmart",
+    "textSelector": "[data-testid='storeFinderCashPayment-store-walmart'] p",
+    "clickableElementSelector": "[data-testid='storeFinderCashPayment-store-walmart']"
+  },
+  {
+    "name": "Soriana",
+    "textSelector": "[data-testid='storeFinderCashPayment-store-soriana'] p",
+    "clickableElementSelector": "[data-testid='storeFinderCashPayment-store-soriana']"
+  },
+  {
+    "name": "Bodega Aurrerá",
+    "textSelector": "[data-testid='storeFinderCashPayment-store-bodegaAurrera'] p",
+    "clickableElementSelector": "[data-testid='storeFinderCashPayment-store-bodegaAurrera']"
+  },
+  {
+    "name": "Walmart Express",
+    "textSelector": "[data-testid='storeFinderCashPayment-store-walmartExpress'] p",
+    "clickableElementSelector": "[data-testid='storeFinderCashPayment-store-walmartExpress']"
+  },
+  {
+    "name": "Sam's Club",
+    "textSelector": "[data-testid='storeFinderCashPayment-store-samsClub'] p",
+    "clickableElementSelector": "[data-testid='storeFinderCashPayment-store-samsClub']"
+  },
+  {
+    "name": "Kiosko",
+    "textSelector": "[data-testid='storeFinderCashPayment-store-kiosko'] p",
+    "clickableElementSelector": "[data-testid='storeFinderCashPayment-store-kiosko']"
+  },
+  {
+    "name": "Farmapronto",
+    "textSelector": "[data-testid='storeFinderCashPayment-store-farmapronto'] p",
+    "clickableElementSelector": "[data-testid='storeFinderCashPayment-store-farmapronto']"
+  },
+  {
+    "name": "X24",
+    "textSelector": "[data-testid='storeFinderCashPayment-store-x24'] p",
+    "clickableElementSelector": "[data-testid='storeFinderCashPayment-store-x24']"
+  },
+  {
+    "name": "AirPak",
+    "textSelector": "[data-testid='storeFinderCashPayment-store-airpak'] p",
+    "clickableElementSelector": "[data-testid='storeFinderCashPayment-store-airpak']"
+  },
+  {
+    "name": "Yomp",
+    "textSelector": "[data-testid='storeFinderCashPayment-store-yomp'] p",
+    "clickableElementSelector": "[data-testid='storeFinderCashPayment-store-yomp']"
+  }
+]

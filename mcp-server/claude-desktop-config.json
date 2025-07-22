@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "payclip-testing": {
+      "command": "node",
+      "args": ["index.js"],
+      "cwd": "/Users/gustavo.garcia/Desktop/clip/puppeter_checkout/mcp-server",
+      "env": {
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}

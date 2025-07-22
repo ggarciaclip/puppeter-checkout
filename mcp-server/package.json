@@ -1,0 +1,30 @@
+{
+  "name": "payclip-testing-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for PayClip E2E Testing Framework",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "validate": "node validate.js",
+    "configure": "node configure.js",
+    "test": "node validate.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "child_process": "^1.0.2",
+    "fs": "^0.0.1-security",
+    "path": "^0.12.7"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "payclip",
+    "testing",
+    "e2e",
+    "puppeteer"
+  ],
+  "author": "PayClip Team",
+  "license": "MIT"
+}

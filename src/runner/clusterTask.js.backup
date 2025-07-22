@@ -1,0 +1,1083 @@
+const mlog = require("mocha-logger");
+const { ACTION_ERROR_MESSAGES } = require("../constants/errorMessage");
+const { run } = require("../helpers/runFn");
+const {
+  fillEmail,
+  fillPhone,
+  fillCard,
+  clickSpeiPayment,
+  clickCashPayment,
+  handleSpeiPaymentFlow,
+  handleCashPaymentFlow,
+  payCheckout,
+  waitForPaymentTransition,
+  clickSaveMyInfo,
+  isSaveMyInfoChecked,
+  getSummaryAmount,
+  validateInstallments,
+} = require("../actions/module/actions-module");
+const { getSuccessPaymentPage } = require("../actions/getSuccessPaymentPage");
+const { generateSubscription } = require("./subscriptionTask");
+const { writeFile, createDirectory } = require("../lib/fs_utils");
+const { getFormattedDateTime } = require("../lib/date_utils");
+const {
+  takeScreenshotAndSave,
+  forceMandatoryScreenshot,
+} = require("../image/takeScreenshot");
+const { formatRequestLogs } = require("../lib/formatRequestLogs");
+const {
+  convertImagesToVideo,
+  deleteScreenshotsDirectory,
+} = require("../lib/videoUtils");
+const { saveSuccessfulUser } = require("../lib/successfulUsersManager");
+// const PuppeteerScreenRecorder = require("puppeteer-screen-recorder"); // Removed due to installation issues
+const {
+  PAYMENT_FLOWS,
+  PAYMENT_REQUEST_TYPES,
+} = require("../enums/paymentFlowTypes");
+const {
+  DEV,
+  CHECKOUT_PAGE_URL,
+  SECURE_API,
+  SUBSCRIPTION_PAGE_URL,
+} = require("../constants/environment");
+const {
+  logHeader,
+  logPaymentStatus,
+  logHeaderError,
+} = require("../lib/logger");
+const {
+  initializeFileLogging,
+  saveLogsToFile,
+  addLogEntry,
+  clearCurrentLogs,
+} = require("../lib/fileLogger");
+const { cleanOldTestRuns } = require("../lib/testHistoryManager");
+const {
+  getTypeConditionsMap,
+  getFlowConditionsMap,
+} = require("../helpers/conditionsHelper");
+require("dotenv").config();
+
+const env = (process.env.ENV || DEV).toUpperCase(); // environment;
+const SAVE_TEST_DIR = `completed_tests/test_runs`;
+const RECORD_PAYMENT = Boolean(process.env.RECORD);
+
+async function taskCheckoutPay(page, data, test_run_id, results_run) {
+  const DEFAULT_PAGE_TIMEOUT = 15000;
+  const TIMEOUT_WAIT_LOGS = 3000;
+  const BASE_DIR = process.cwd();
+  const {
+    test_case_id,
+    card,
+    email,
+    phone,
+    payment_request_id,
+    payment_flow_type,
+    payment_request_type,
+    payment_type = "CARD", // Add payment_type with default
+    request_log_list,
+    i,
+  } = data;
+  const _t = getTypeConditionsMap(payment_request_type);
+  const _f = getFlowConditionsMap(payment_flow_type);
+
+  let status = "OK";
+  let displayed_amount;
+  let TEST_CASE_ID_FULL_PATH;
+  let recorder = null;
+  let videoPath = null;
+  let screenshotInterval = null;
+  let saveMyInfoWasChecked = false; // Track if save my info checkbox was checked
+
+  try {
+    logHeader(data, "📊 PARAMETERS");
+    logHeader({}, "📁 GENERATING DIRECTORY...");
+
+    createDirectory(
+      `${SAVE_TEST_DIR}/${env}-${payment_request_type.toLocaleLowerCase()}/${test_run_id}`,
+      test_case_id
+    );
+
+    /* 
+    Structure => completed_tests/test_runs/Env+PaymentType/test_run_id/test_case_id 
+    Example    => completed_tests/test_runs/DEV-link_de_pago/09_30_11.30.00/GUEST_MXN
+     */
+    TEST_CASE_ID_FULL_PATH = `${SAVE_TEST_DIR}/${env}-${payment_request_type.toLocaleLowerCase()}/${test_run_id}/${test_case_id.toString()}`;
+
+    // Initialize file logging for this test case
+    const fullTestCaseDir = `${BASE_DIR}/${TEST_CASE_ID_FULL_PATH}`;
+    
+    initializeFileLogging(test_case_id, fullTestCaseDir);
+    logHeader({}, `📝 File logging initialized for: ${test_case_id}`, test_case_id);
+
+    await page.setViewport({ width: 1280, height: 1080 });
+    await page.setRequestInterception(true);
+    page.setDefaultTimeout(DEFAULT_PAGE_TIMEOUT);
+
+    const targetPage = page;
+
+    targetPage.on("request", (request) => {
+      if (request.resourceType() === "image") request.abort();
+      request.continue();
+    });
+
+    targetPage.on("response", async (response) => {
+      const request = response.request();
+      const requestUrl = request?.url();
+
+      // URLs to exclude from logging
+      const excludedUrls = [
+        "api.segment.io/v1/i",
+        "dev-elements.payclip.com/api/risk",
+        "api.segment.io",
+        "analytics.payclip.com",
+        "events.payclip.com",
+        "/prevention_data/",
+        "rum.browser-intake-datadoghq.com",
+        "api.ipify.org",
+      ];
+
+      // Check if URL should be excluded
+      const shouldExclude = excludedUrls.some(
+        (excludedUrl) => requestUrl && requestUrl.includes(excludedUrl)
+      );
+
+      // Only log API requests (avoid logging static assets and excluded URLs)
+      if (
+        requestUrl &&
+        !shouldExclude &&
+        (requestUrl.includes("api") || requestUrl.includes("card_tokens"))
+      ) {
+        try {
+          const headers = response.headers();
+          const status = response.status();
+
+          // Get request payload if available
+          let requestPayload = null;
+          try {
+            if (request.postData()) {
+              requestPayload = JSON.parse(request.postData());
+            }
+          } catch (e) {
+            // Not JSON or no post data
+            requestPayload = request.postData() || null;
+          }
+
+          // Get response body if available
+          let responseBody = null;
+          try {
+            if (headers["content-type"]?.includes("application/json")) {
+              responseBody = await response.json();
+            } else {
+              responseBody = await response.text();
+            }
+          } catch (e) {
+            // Response already consumed or not readable
+            responseBody = null;
+          }
+
+          // Skip card_tokens requests with null payload and response
+          const isCardTokens = requestUrl.includes("card_tokens");
+          const hasNullData = requestPayload === null && responseBody === null;
+
+          if (isCardTokens && hasNullData) {
+            console.log(`Skipping card_tokens with null data: ${requestUrl}`);
+            return;
+          }
+
+          // Add to request log list
+          request_log_list.push({
+            url: requestUrl,
+            method: request.method(),
+            statusCode: status,
+            headers: headers,
+            payload: requestPayload,
+            response: responseBody,
+            timestamp: new Date().toISOString(),
+          });
+        } catch (error) {
+          console.log(`Error logging request to ${requestUrl}:`, error.message);
+        }
+      }
+    });
+
+    const startWaitingForEvents = () => {
+      promises.push(targetPage.waitForNavigation());
+    };
+    const promises = [];
+    startWaitingForEvents();
+
+    // Initialize video recording if enabled
+    if (RECORD_PAYMENT) {
+      videoPath = `${TEST_CASE_ID_FULL_PATH}/screenshots`;
+      logHeader(
+        {},
+        `📹 Iniciando grabación de screenshots secuenciales: ${test_case_id}`
+      );
+
+      // Create screenshots directory
+      const fs = require("fs");
+      if (!fs.existsSync(videoPath)) {
+        fs.mkdirSync(videoPath, { recursive: true });
+      }
+
+      // Take initial screenshot
+      let screenshotCount = 0;
+      try {
+        const initialScreenshotPath = `${videoPath}/frame_${String(
+          Math.max(0, screenshotCount)
+        ).padStart(4, "0")}.png`;
+        await targetPage.screenshot({
+          path: initialScreenshotPath,
+          fullPage: false,
+        });
+        screenshotCount++;
+        logHeader({}, `📸 Screenshot inicial capturado: frame_0000.png`);
+      } catch (err) {
+        logHeaderError(
+          {},
+          `⚠️ Error capturando screenshot inicial: ${err.message}`,
+          err
+        );
+      }
+
+      // Take screenshots every 1000ms (1 second)
+      screenshotInterval = setInterval(async () => {
+        try {
+          const screenshotPath = `${videoPath}/frame_${String(
+            Math.max(0, screenshotCount)
+          ).padStart(4, "0")}.png`;
+          await targetPage.screenshot({
+            path: screenshotPath,
+            fullPage: false,
+          });
+          screenshotCount++;
+          // Log removed: screenshot count updates are too verbose
+        } catch (err) {
+          // Screenshot failed, but continue - don't log to avoid spam
+        }
+      }, 1000);
+    }
+
+    if (_t.get("isSubscription")) {
+      const url = SUBSCRIPTION_PAGE_URL[env];
+      logHeader({}, `🔄 Generating subscription ${test_case_id}`);
+      await run(
+        async () =>
+          await generateSubscription(
+            targetPage,
+            url,
+            data,
+            TEST_CASE_ID_FULL_PATH
+          ),
+        ACTION_ERROR_MESSAGES.GENERATING_SUBSCRIPTION
+      );
+    }
+
+    if (_t.get("isNotSubscription")) {
+      await targetPage.goto(`${CHECKOUT_PAGE_URL[env]}/${payment_request_id}`);
+    }
+
+    await Promise.all(promises);
+
+    if (_t.get("isNotHostedCheckout") && _t.get("isNotSubscription")) {
+      logHeader({}, `📧 Filling Email: ${test_case_id}`);
+      await run(
+        async () => await fillEmail(targetPage, email),
+        ACTION_ERROR_MESSAGES.FILL_EMAIL
+      );
+
+      logHeader({}, `📱 Filling Phone: ${test_case_id}`);
+      await run(
+        async () => await fillPhone(targetPage, phone),
+        ACTION_ERROR_MESSAGES.FILL_PHONE
+      );
+    }
+
+    // Handle different payment types
+    switch (payment_type) {
+      case "SPEI":
+        logHeader({}, `🏦 Selecting SPEI Payment: ${test_case_id}`);
+        await run(
+          async () => await clickSpeiPayment(targetPage),
+          ACTION_ERROR_MESSAGES.CLICK_SPEI_PAYMENT ||
+            "Error clicking SPEI payment button"
+        );
+        break;
+      case "CASH":
+        logHeader({}, `💵 Selecting Cash Payment: ${test_case_id}`);
+        await run(
+          async () => await clickCashPayment(targetPage),
+          ACTION_ERROR_MESSAGES.CLICK_CASH_PAYMENT ||
+            "Error clicking Cash payment button"
+        );
+        break;
+      case "CARD":
+      case "ONE_CLICK":
+      default:
+        logHeader({}, `💳 Filling Card: ${test_case_id}`);
+        await run(
+          async () => await fillCard(targetPage, card),
+          ACTION_ERROR_MESSAGES.FILL_CARD
+        );
+
+        // Wait for card to be processed and page to stabilize
+        logHeader(
+          {},
+          `⏳ Esperando que la página se estabilice después del llenado de tarjeta: ${test_case_id}`
+        );
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        // Validate installments after filling card (only for CARD payments)
+        logHeader(
+          {},
+          `🔍 Validando installments después de llenar tarjeta: ${test_case_id}`
+        );
+        try {
+          const installmentsResult = await validateInstallments(
+            targetPage,
+            test_case_id,
+            request_log_list
+          );
+
+          if (installmentsResult.success) {
+            logHeader(
+              {},
+              `✅ Validación de installments exitosa: ${installmentsResult.validInstallments}/${installmentsResult.totalInstallments} válidos`
+            );
+
+            if (installmentsResult.selectedInstallment) {
+              logHeader(
+                {},
+                `🎯 Installment seleccionado: ${installmentsResult.selectedInstallment.quantity} cuotas - ${installmentsResult.selectedInstallment.fullText}`
+              );
+
+              // Additional stabilization time after installment selection
+              logHeader(
+                {},
+                `⏳ Tiempo adicional de estabilización después de selección de installments...`
+              );
+              await new Promise((resolve) => setTimeout(resolve, 3000));
+
+              // Final verification of installment selection before continuing
+              const finalVerification = await targetPage.evaluate(() => {
+                const checkedRadio = document.querySelector(
+                  'input[type="radio"]:checked'
+                );
+                return {
+                  hasSelection: !!checkedRadio,
+                  selectedValue: checkedRadio ? checkedRadio.value : null,
+                  selectedTestId: checkedRadio
+                    ? checkedRadio
+                        .closest("[data-testid]")
+                        ?.getAttribute("data-testid")
+                    : null,
+                };
+              });
+
+              if (finalVerification.hasSelection) {
+                logHeader(
+                  {},
+                  `✅ Verificación final exitosa - Installment confirmado: ${finalVerification.selectedValue} (${finalVerification.selectedTestId})`
+                );
+              } else {
+                logHeader(
+                  {},
+                  `⚠️ ADVERTENCIA: Verificación final falló - No hay radio button seleccionado`
+                );
+              }
+            }
+          } else {
+            logHeader(
+              {},
+              `❌ Validación de installments falló: ${installmentsResult.error}`
+            );
+
+            // CRÍTICO: Si falla por selección obligatoria, DETENER EL PAGO
+            if (
+              installmentsResult.error === "INSTALLMENT_SELECTION_MANDATORY"
+            ) {
+              logHeader(
+                {},
+                `🚨 ERROR CRÍTICO: INSTALLMENTS DISPONIBLES PERO NO SELECCIONADOS`
+              );
+              logHeader(
+                {},
+                `🚨 DETENIENDO PROCESO - EL PAGO NO PUEDE CONTINUAR SIN SELECCIÓN DE INSTALLMENTS`
+              );
+
+              // Tomar screenshot del error
+              const errorScreenshotPath = `${TEST_CASE_ID_FULL_PATH}/installments-selection-error.png`;
+              await takeScreenshotAndSave(errorScreenshotPath, targetPage);
+
+              // Lanzar error para detener el proceso
+              throw new Error(
+                `INSTALLMENT_SELECTION_MANDATORY: Hay ${installmentsResult.availableInstallments} installments disponibles pero no se seleccionó ninguno. El pago no puede proceder.`
+              );
+            }
+          }
+        } catch (installmentsError) {
+          logHeaderError(
+            {},
+            `⚠️ Error en validación de installments: ${installmentsError.message}`,
+            installmentsError
+          );
+
+          // Si es el error de selección obligatoria, re-lanzarlo para detener el proceso
+          if (
+            installmentsError.message.includes(
+              "INSTALLMENT_SELECTION_MANDATORY"
+            )
+          ) {
+            throw installmentsError;
+          }
+        }
+
+        break;
+    }
+
+    // Handle save my info ONLY for REGISTER flows
+    if (payment_flow_type === "REGISTER" && _t.get("isNotHostedCheckout")) {
+      logHeader(
+        {},
+        `🔄 Iniciando flujo Save My Info para REGISTER: ${test_case_id}`
+      );
+
+      try {
+        // First, check current state of the checkbox
+        let initialChecked = await isSaveMyInfoChecked(targetPage);
+        logHeader(
+          {},
+          `🔍 Estado inicial del checkbox: ${
+            initialChecked ? "CHECKED ✅" : "UNCHECKED ❌"
+          }`
+        );
+
+        // If not checked, click to check it
+        if (!initialChecked) {
+          await clickSaveMyInfo(targetPage);
+          logHeader({}, `✅ Save my info clicked: ${test_case_id}`);
+
+          // Wait a moment for the state to update
+          await new Promise((resolve) => setTimeout(resolve, 500));
+
+          // Verify it's now checked
+          saveMyInfoWasChecked = await isSaveMyInfoChecked(targetPage);
+          logHeader(
+            {},
+            `🔍 Estado después del click: ${
+              saveMyInfoWasChecked ? "CHECKED ✅" : "UNCHECKED ❌"
+            }`
+          );
+
+          // If still not checked, try clicking again
+          if (!saveMyInfoWasChecked) {
+            logHeader(
+              {},
+              `🔄 Checkbox aún no marcado, intentando segundo click...`
+            );
+            await clickSaveMyInfo(targetPage);
+            await new Promise((resolve) => setTimeout(resolve, 500));
+
+            saveMyInfoWasChecked = await isSaveMyInfoChecked(targetPage);
+            logHeader(
+              {},
+              `🔍 Estado después del segundo click: ${
+                saveMyInfoWasChecked ? "CHECKED ✅" : "UNCHECKED ❌"
+              }`
+            );
+          }
+        } else {
+          // Already checked, no need to click
+          saveMyInfoWasChecked = true;
+          logHeader({}, `✅ Checkbox ya estaba marcado: ${test_case_id}`);
+        }
+
+        // Final verification
+        if (saveMyInfoWasChecked) {
+          logHeader(
+            {},
+            `🎉 Save My Info confirmado como CHECKED para flujo REGISTER`
+          );
+        } else {
+          logHeader(
+            {},
+            `⚠️ ADVERTENCIA: No se pudo marcar el checkbox Save My Info`
+          );
+        }
+      } catch (error) {
+        // Generate alert but continue execution
+        logHeaderError(
+          {},
+          `⚠️ Error en flujo Save My Info: ${error.message}`,
+          error
+        );
+
+        // Still try to check the checkbox status even if click failed
+        try {
+          saveMyInfoWasChecked = await isSaveMyInfoChecked(targetPage);
+          logHeader(
+            {},
+            `🔍 Estado del checkbox después de error: ${
+              saveMyInfoWasChecked ? "CHECKED ✅" : "UNCHECKED ❌"
+            }`
+          );
+        } catch (checkError) {
+          logHeader(
+            {},
+            `⚠️ No se pudo verificar estado del checkbox: ${checkError.message}`
+          );
+          saveMyInfoWasChecked = false;
+        }
+      }
+    } else if (payment_flow_type !== "REGISTER") {
+      logHeader(
+        {},
+        `ℹ️ Flujo ${payment_flow_type} - Omitiendo Save My Info (solo para REGISTER)`
+      );
+      saveMyInfoWasChecked = false;
+    }
+
+    //Get the payment amount in the checkout page
+    displayed_amount = await getSummaryAmount(
+      page,
+      payment_request_type === PAYMENT_REQUEST_TYPES.SUBSCRIPTION
+    );
+
+    logHeader({}, `📸 Saving screenshot for form page fill: ${test_case_id}`);
+    const PATH_IMAGE_FORM_PAGE = `${TEST_CASE_ID_FULL_PATH}/form-page-fill.png`;
+
+    await takeScreenshotAndSave(PATH_IMAGE_FORM_PAGE, targetPage);
+
+    // CRITICAL PRE-PAYMENT VERIFICATION: Ensure installments are properly selected
+    if (payment_type === "CARD" || payment_type === "ONE_CLICK") {
+      logHeader(
+        {},
+        `🔍 VERIFICACIÓN CRÍTICA PRE-PAGO: Confirmando selección de installments...`
+      );
+
+      try {
+        const prePaymentCheck = await targetPage.evaluate(() => {
+          // Check for selected radio button
+          const checkedRadio = document.querySelector(
+            'input[type="radio"]:checked'
+          );
+
+          // Check if installments container is visible
+          const installmentsContainer = document.querySelector(
+            '[data-testid="installments-input"]'
+          );
+          const installmentsList = document.querySelector(
+            '[data-testid="installmentsList-wrap"]'
+          );
+
+          // Get all radio buttons
+          const allRadios = Array.from(
+            document.querySelectorAll('input[type="radio"]')
+          );
+
+          // Try to click the first radio's parent span if no radio is checked
+          let hasCheckedRadio = !!checkedRadio;
+
+          if (allRadios.length > 0) {
+            try {
+              const firstRadio = allRadios[3];
+              const parentSpan = firstRadio.closest("span");
+
+              if (parentSpan) {
+                console.log(
+                  "🎯 Intentando click en parent span del primer radio:"
+                );
+                console.log(`   Radio Value: ${firstRadio.value}`);
+                console.log(`   Radio Name: ${firstRadio.name}`);
+                console.log(
+                  `   Span Class: ${parentSpan.className || "no-class"}`
+                );
+                console.log(`   Span Tag: ${parentSpan.tagName}`);
+
+                parentSpan.click();
+
+                // Wait a moment and check if the first radio is now selected
+                setTimeout(() => {
+                  hasCheckedRadio = !!firstRadio.checked;
+                  console.log("✅ Resultado después del click en parent span:");
+                  console.log(`   Success: ${hasCheckedRadio}`);
+                  console.log(
+                    `   Checked Value: ${
+                      firstRadio.checked ? firstRadio.value : null
+                    }`
+                  );
+                }, 200);
+              } else {
+                console.log(
+                  "❌ No se encontró parent span para el primer radio"
+                );
+                hasCheckedRadio = false;
+              }
+            } catch (error) {
+              console.log(
+                `❌ Error al hacer click en parent span: ${error.message}`
+              );
+              hasCheckedRadio = false;
+            }
+          }
+
+          return {
+            hasCheckedRadio: hasCheckedRadio,
+            checkedValue: checkedRadio ? checkedRadio.value : null,
+            checkedTestId: checkedRadio
+              ? checkedRadio
+                  .closest("[data-testid]")
+                  ?.getAttribute("data-testid")
+              : null,
+            installmentsContainerExists: !!installmentsContainer,
+            installmentsListExists: !!installmentsList,
+            totalRadios: allRadios.length,
+            radioStates: allRadios.map((radio, index) => ({
+              index,
+              name: radio.name,
+              value: radio.value,
+              checked: radio.checked,
+              testId: radio
+                .closest("[data-testid]")
+                ?.getAttribute("data-testid"),
+              parentSpan: radio.closest("span")
+                ? {
+                    tagName: radio.closest("span").tagName,
+                    className: radio.closest("span").className || "no-class",
+                    id: radio.closest("span").id || "no-id",
+                    outerHTML:
+                      radio.closest("span").outerHTML.substring(0, 100) + "...",
+                  }
+                : null,
+            })),
+          };
+        });
+
+        // If no radio is selected and there are radios available, this is a critical issue
+        if (prePaymentCheck.totalRadios > 0) {
+          // Tomar screenshot del error crítico
+          const criticalErrorScreenshotPath = `${TEST_CASE_ID_FULL_PATH}/installment-selected.png`;
+          await takeScreenshotAndSave(criticalErrorScreenshotPath, targetPage);
+
+          // Lanzar error crítico para detener completamente el proceso
+          throw new Error(
+            `CRITICAL_PRE_PAYMENT_ERROR: Detectados ${prePaymentCheck.totalRadios} radio buttons de installments pero ninguno está seleccionado. El pago NO puede proceder sin selección obligatoria de installments.`
+          );
+        }
+      } catch (verificationError) {
+        logHeader(
+          {},
+          `⚠️ Error en verificación pre-pago: ${verificationError.message}`
+        );
+      }
+    }
+
+    //Click pay button
+    logHeader({}, `💳 Clicking Pay Button: ${test_case_id}`);
+    await run(
+      async () => await payCheckout(page, i),
+      ACTION_ERROR_MESSAGES.PAY_CHECKOUT
+    );
+
+    // Handle different payment type flows after payment button click
+    if (payment_type === "SPEI") {
+      logHeader({}, `🏦 Handling SPEI payment flow: ${test_case_id}`);
+      await run(
+        async () => await handleSpeiPaymentFlow(targetPage),
+        ACTION_ERROR_MESSAGES.HANDLE_SPEI_FLOW ||
+          "Error handling SPEI payment flow"
+      );
+    } else if (payment_type === "CASH") {
+      logHeader({}, `💵 Handling Cash payment flow: ${test_case_id}`);
+      await run(
+        async () => await handleCashPaymentFlow(targetPage, test_case_id),
+        ACTION_ERROR_MESSAGES.HANDLE_CASH_FLOW ||
+          "Error handling Cash payment flow"
+      );
+    }
+
+    // Only proceed to payment transition and success page for non-CASH payments
+    if (payment_type !== "CASH") {
+      logHeader({}, `⏳ Waiting for payment transition: ${test_case_id}`);
+      await run(
+        async () =>
+          await waitForPaymentTransition(
+            page,
+            payment_request_type === PAYMENT_REQUEST_TYPES.SUBSCRIPTION,
+            false //3ds
+          ),
+        ACTION_ERROR_MESSAGES.WAIT_PAYMENT_TRANSITION
+      );
+
+      logHeader({}, `💰 Processing payment success: ${test_case_id}`);
+      await run(
+        async () =>
+          await getSuccessPaymentPage(
+            page,
+            payment_request_type === PAYMENT_REQUEST_TYPES.SUBSCRIPTION
+          ),
+        ACTION_ERROR_MESSAGES.PAYMENT_SUCCESS
+      );
+
+      logHeader(
+        {},
+        `🎉 Saving screenshot for success pay page: ${test_case_id}`
+      );
+      const PATH_IMAGE_SUCCESS_PAGE = `${TEST_CASE_ID_FULL_PATH}/success-pay-page.png`;
+
+      // CRITICAL: This screenshot MUST succeed before any cleanup
+      try {
+        await takeScreenshotAndSave(PATH_IMAGE_SUCCESS_PAGE, targetPage, 5); // 5 retries
+        logHeader({}, `✅ Success screenshot saved: ${test_case_id}`);
+      } catch (screenshotError) {
+        logHeader(
+          {},
+          `🚨 CRITICAL: Failed to save success screenshot after retries: ${screenshotError.message}`
+        );
+
+        // EXTREME MEASURE: Force mandatory success screenshot
+        try {
+          logHeader(
+            {},
+            `🚨 EXTREME MEASURE: Forcing mandatory success screenshot: ${test_case_id}`
+          );
+          const availablePages = [targetPage, page].filter(
+            (p) => p && !p.isClosed()
+          );
+          const forceSuccess = await forceMandatoryScreenshot(
+            PATH_IMAGE_SUCCESS_PAGE,
+            availablePages,
+            test_case_id
+          );
+
+          if (forceSuccess) {
+            logHeader(
+              {},
+              `🎯 FORCED success screenshot captured: ${test_case_id}`
+            );
+          } else {
+            logHeader(
+              {},
+              `🚨 COMPLETE FAILURE: Could not capture mandatory success screenshot: ${test_case_id}`
+            );
+          }
+        } catch (extremeError) {
+          logHeader(
+            {},
+            `🚨 EXTREME FAILURE in success screenshot: ${extremeError.message}`
+          );
+        }
+        // Continue execution but log the critical failure
+      }
+
+      // Check if this was a successful CARD payment and save user data
+      if (payment_type === "CARD" || payment_type === "ONE_CLICK") {
+        logHeader(
+          {},
+          `💾 Verificando y guardando datos de usuario exitoso: ${test_case_id}`
+        );
+
+        try {
+          const userData = {
+            email,
+            card,
+            testCaseId: test_case_id,
+            paymentRequestId: payment_request_id,
+            amount: displayed_amount,
+            saveMyInfoChecked: saveMyInfoWasChecked,
+          };
+
+          await saveSuccessfulUser(userData);
+        } catch (userSaveError) {
+          logHeader(
+            {},
+            `⚠️ Error guardando datos de usuario exitoso: ${userSaveError.message}`
+          );
+        }
+      }
+    } else {
+      // For CASH payments, take screenshot of barcode page instead
+      logHeader(
+        {},
+        `🎉 Saving screenshot for cash payment barcode page: ${test_case_id}`
+      );
+      const PATH_IMAGE_BARCODE_PAGE = `${TEST_CASE_ID_FULL_PATH}/cash-barcode-page.png`;
+      await takeScreenshotAndSave(PATH_IMAGE_BARCODE_PAGE, targetPage);
+    }
+  } catch (e) {
+    status = `Failed reason: { ${e} }`;
+    console.log(e);
+    logHeader(
+      {},
+      `🚨 CRITICAL ERROR: Attempting mandatory screenshot capture before cleanup: ${test_case_id}`
+    );
+
+    const PATH_IMAGE_ERROR_HAPPENED = `${TEST_CASE_ID_FULL_PATH}/error-ocurred.png`;
+
+    // MANDATORY ERROR SCREENSHOT - Multiple attempts with different pages
+    let screenshotSuccess = false;
+
+    // Attempt 1: Try with the original page (might still be responsive)
+    try {
+      logHeader(
+        {},
+        `📸 Attempt 1: Error screenshot with original page: ${test_case_id}`
+      );
+      await takeScreenshotAndSave(PATH_IMAGE_ERROR_HAPPENED, page, 3);
+      screenshotSuccess = true;
+      logHeader(
+        {},
+        `✅ Error screenshot captured successfully with original page: ${test_case_id}`
+      );
+    } catch (originalPageError) {
+      logHeader(
+        {},
+        `⚠️ Original page screenshot failed: ${originalPageError.message}`
+      );
+    }
+
+    // Attempt 2: Try with targetPage if original page failed
+    if (!screenshotSuccess && targetPage && !targetPage.isClosed()) {
+      try {
+        logHeader(
+          {},
+          `📸 Attempt 2: Error screenshot with target page: ${test_case_id}`
+        );
+        await takeScreenshotAndSave(PATH_IMAGE_ERROR_HAPPENED, targetPage, 3);
+        screenshotSuccess = true;
+        logHeader(
+          {},
+          `✅ Error screenshot captured successfully with target page: ${test_case_id}`
+        );
+      } catch (targetPageError) {
+        logHeader(
+          {},
+          `⚠️ Target page screenshot failed: ${targetPageError.message}`
+        );
+      }
+    }
+
+    // Final attempt with any available page
+    if (!screenshotSuccess) {
+      try {
+        logHeader(
+          {},
+          `📸 Final attempt: Error screenshot with best available page: ${test_case_id}`
+        );
+        const bestPage =
+          targetPage && !targetPage.isClosed() ? targetPage : page;
+        await takeScreenshotAndSave(PATH_IMAGE_ERROR_HAPPENED, bestPage, 5); // More retries for final attempt
+        screenshotSuccess = true;
+        logHeader(
+          {},
+          `✅ Error screenshot captured on final attempt: ${test_case_id}`
+        );
+      } catch (finalError) {
+        logHeaderError(
+          {},
+          `⚠️ Final regular attempt failed: ${finalError.message}`,
+          finalError
+        );
+
+        // EXTREME MEASURE: Use force screenshot with all available pages
+        try {
+          logHeader(
+            {},
+            `🚨 EXTREME MEASURE: Attempting force screenshot capture: ${test_case_id}`
+          );
+          const availablePages = [page, targetPage].filter(
+            (p) => p && !p.isClosed()
+          );
+          screenshotSuccess = await forceMandatoryScreenshot(
+            PATH_IMAGE_ERROR_HAPPENED,
+            availablePages,
+            test_case_id
+          );
+
+          if (screenshotSuccess) {
+            logHeader({}, `🎯 FORCE screenshot SUCCESS: ${test_case_id}`);
+          }
+        } catch (extremeError) {
+          logHeaderError(
+            {},
+            `🚨 EXTREME FAILURE: ${extremeError.message}`,
+            extremeError
+          );
+        }
+      }
+    }
+
+    if (!screenshotSuccess) {
+      logHeader(
+        {},
+        `🚨 COMPLETE FAILURE: No error screenshot could be captured for debugging: ${test_case_id}`
+      );
+    } else {
+      logHeader({}, `✅ MANDATORY error screenshot secured: ${test_case_id}`);
+    }
+  } finally {
+    // CRITICAL: Ensure all pending screenshots complete before cleanup
+    logHeader({}, `🔄 Starting cleanup process for: ${test_case_id}`);
+
+    // Small delay to ensure any pending screenshot operations complete
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // Stop video recording if it was started and convert to video
+    if (RECORD_PAYMENT && screenshotInterval) {
+      clearInterval(screenshotInterval);
+      logHeader({}, `📹 Grabación de screenshots completada: ${videoPath}`);
+
+      // Convert screenshots to video
+      try {
+        const videoOutputPath = `${TEST_CASE_ID_FULL_PATH}/test-execution.mp4`;
+
+        logHeader({}, `🎬 Iniciando conversión de imágenes a video...`);
+
+        // Convert to MP4
+        await convertImagesToVideo(videoPath, videoOutputPath, 2);
+        logHeader({}, `✅ Video MP4 creado: test-execution.mp4`);
+
+        // Clean up screenshots directory after successful video creation
+        try {
+          await deleteScreenshotsDirectory(videoPath);
+          // Log removed: screenshot cleanup notification is too verbose
+        } catch (cleanupError) {
+          logHeaderError(
+            {},
+            `⚠️ Error eliminando screenshots: ${cleanupError.message}`,
+            cleanupError
+          );
+        }
+
+        logHeader(
+          {},
+          `🎉 Grabación completa - Video disponible: ${videoOutputPath}`
+        );
+      } catch (videoError) {
+        logHeaderError(
+          {},
+          `⚠️ Error creando video: ${videoError.message}`,
+          videoError
+        );
+        logHeader({}, `💡 Screenshots disponibles en: ${videoPath}/`);
+      }
+    }
+
+    // CRITICAL: Save all accumulated logs to text file before any cleanup
+    try {
+      logHeader({}, `💾 Saving execution logs to file: ${test_case_id}`);
+      const logFilePath = await saveLogsToFile(test_case_id);
+      logHeader({}, `✅ Execution logs saved: ${logFilePath}`);
+    } catch (logSaveError) {
+      logHeaderError(
+        {},
+        `⚠️ Error saving execution logs: ${logSaveError.message}`,
+        logSaveError
+      );
+      // Try to save with error indication
+      try {
+        addLogEntry(
+          `🚨 Error saving main logs: ${logSaveError.message}`,
+          "ERROR",
+          null,
+          test_case_id
+        );
+        await saveLogsToFile(test_case_id);
+      } catch (fallbackError) {
+        console.error(
+          `🚨 CRITICAL: Could not save execution logs: ${fallbackError.message}`
+        );
+      }
+    }
+
+    // Log payment status based on whether there were errors
+    const isPaymentSuccessful = status === "OK";
+    const errorMessage = isPaymentSuccessful ? null : status;
+    logPaymentStatus(test_case_id, isPaymentSuccessful, errorMessage);
+    {
+      //Generate result for excel
+      const result_test_case = [
+        test_case_id,
+        card,
+        email,
+        phone,
+        payment_request_id,
+        payment_flow_type,
+        displayed_amount,
+        payment_request_type,
+        getFormattedDateTime(),
+        status,
+      ];
+
+      results_run.push(result_test_case);
+
+      logHeader({}, `📝 Save logs: ${test_case_id}`);
+      const PATH_LOG_SAVE_DIR =
+        BASE_DIR + `/${TEST_CASE_ID_FULL_PATH}/logs.json`;
+
+      logHeader({}, `💾 Write JSON Logs results: ${test_case_id}`);
+      setTimeout(
+        async () =>
+          await writeFile(
+            PATH_LOG_SAVE_DIR,
+            formatRequestLogs(request_log_list),
+            TIMEOUT_WAIT_LOGS
+          )
+      );
+
+      // Clear file logger after saving all logs
+      setTimeout(() => {
+        try {
+          clearCurrentLogs(test_case_id);
+          console.log(`🧹 File logger cleaned for: ${test_case_id}`);
+        } catch (cleanupError) {
+          console.log(`⚠️ Error cleaning file logger: ${cleanupError.message}`);
+        }
+      }, TIMEOUT_WAIT_LOGS + 1000);
+
+      // Automatic cleanup of old test runs (keep only last 8 per payment type)
+      setTimeout(async () => {
+        try {
+          const paymentType = `${env}-${payment_request_type.toLowerCase()}`;
+          logHeader({}, `🧹 Starting automatic cleanup for: ${paymentType}`);
+          addLogEntry(
+            `🧹 Starting automatic cleanup for: ${paymentType}`,
+            "INFO",
+            null,
+            test_case_id
+          );
+
+          const cleanupResult = await cleanOldTestRuns(paymentType);
+
+          if (cleanupResult.cleaned > 0) {
+            logHeader(
+              {},
+              `✅ Cleanup completed: ${cleanupResult.cleaned} old runs deleted, ${cleanupResult.kept} kept`
+            );
+            addLogEntry(
+              `✅ Cleanup completed: ${cleanupResult.cleaned} old runs deleted, ${cleanupResult.kept} kept`,
+              "SUCCESS",
+              null,
+              test_case_id
+            );
+          }
+        } catch (cleanupError) {
+          logHeader(
+            {},
+            `⚠️ Error during automatic cleanup: ${cleanupError.message}`
+          );
+          addLogEntry(
+            `⚠️ Error during automatic cleanup: ${cleanupError.message}`,
+            "WARNING",
+            null,
+            test_case_id
+          );
+        }
+      }, TIMEOUT_WAIT_LOGS + 2000);
+    }
+  }
+}
+
+module.exports = { taskCheckoutPay };
